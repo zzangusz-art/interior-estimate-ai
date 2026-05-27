@@ -170,21 +170,67 @@ def _parse_docx(file_path: str) -> dict:
 
 
 def _parse_image(file_path: str) -> dict:
-    with open(file_path, "rb") as f:
-        img_bytes = f.read()
+    """
+    이미지 파일을 Vision API용으로 최적화하여 반환.
+    - EXIF 회전 자동 보정 (폰 카메라 사진)
+    - 최장 변 2048px 이하로 리사이즈
+    - JPEG quality 조정으로 5MB 이내 보장
+    """
+    from PIL import Image as PILImage, ImageOps
+
+    # 파일 크기 체크 (20MB 초과 거부)
+    file_size = os.path.getsize(file_path)
+    if file_size > 20 * 1024 * 1024:
+        raise ValueError("이미지 파일이 너무 큽니다 (최대 20MB)")
+
+    with PILImage.open(file_path) as img:
+        # EXIF 회전 보정 (iPhone/Android 카메라 사진 대응)
+        img = ImageOps.exif_transpose(img)
+
+        # 투명도 채널 제거 (RGBA → RGB, P → RGB)
+        if img.mode in ("RGBA", "P", "LA"):
+            background = PILImage.new("RGB", img.size, (255, 255, 255))
+            if img.mode == "P":
+                img = img.convert("RGBA")
+            background.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
+            img = background
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+
+        # 최장 변 2048px 이하로 리사이즈 (과도하게 큰 사진 처리)
+        MAX_DIM = 2048
+        w, h = img.size
+        if max(w, h) > MAX_DIM:
+            ratio = MAX_DIM / max(w, h)
+            img = img.resize((int(w * ratio), int(h * ratio)), PILImage.LANCZOS)
+
+        # JPEG로 인코딩 (quality 단계적 조정으로 4MB 이내 보장)
+        img_bytes = _encode_jpeg(img, target_max_bytes=4 * 1024 * 1024)
+
     b64 = base64.standard_b64encode(img_bytes).decode("utf-8")
-
-    ext = Path(file_path).suffix.lower().lstrip(".")
-    media_map = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "gif": "gif", "webp": "webp"}
-    media_type = f"image/{media_map.get(ext, 'jpeg')}"
-
     return {
         "type": "image",
         "text": "",
         "tables": [],
         "image_base64": b64,
-        "media_type": media_type,
+        "media_type": "image/jpeg",
     }
+
+
+def _encode_jpeg(img, target_max_bytes: int = 4 * 1024 * 1024) -> bytes:
+    """목표 크기 이내로 JPEG 인코딩 (quality 단계적 감소)"""
+    for quality in (92, 80, 65, 50):
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
+        data = buf.getvalue()
+        if len(data) <= target_max_bytes:
+            return data
+    # 최후 수단: 절반 크기로 재시도
+    w, h = img.size
+    small = img.resize((w // 2, h // 2), PILImage.LANCZOS)
+    buf = io.BytesIO()
+    small.save(buf, format="JPEG", quality=75, optimize=True)
+    return buf.getvalue()
 
 
 def _parse_hwp(file_path: str) -> dict:
