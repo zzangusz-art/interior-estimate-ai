@@ -1,6 +1,9 @@
 /* ===== RESET & BASE ===== */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* hidden 속성이 display: flex/grid에 덮어씌워지지 않도록 보장 */
+[hidden] { display: none !important; }
+
 :root {
   --primary: #2563eb;
   --primary-dark: #1d4ed8;
