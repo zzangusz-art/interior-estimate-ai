@@ -1,51 +1,71 @@
 /* ===== STATE ===== */
 let selectedFile = null;
+let isAnalyzing = false;
 
 /* ===== INIT ===== */
 document.addEventListener('DOMContentLoaded', () => {
   setupDragDrop();
   setupTabs();
   document.getElementById('fileInput').addEventListener('change', onFileSelect);
-  document.getElementById('removeFile').addEventListener('click', clearFile);
+  document.getElementById('removeFile').addEventListener('click', onRemoveFile);
   document.getElementById('analyzeBtn').addEventListener('click', onAnalyze);
+  document.getElementById('selectFileBtn').addEventListener('click', e => {
+    e.stopPropagation();
+    document.getElementById('fileInput').click();
+  });
 });
 
 /* ===== DRAG & DROP ===== */
 function setupDragDrop() {
   const zone = document.getElementById('dropZone');
-  zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
-  zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+
+  zone.addEventListener('dragover', e => {
+    e.preventDefault();
+    zone.classList.add('drag-over');
+  });
+  zone.addEventListener('dragleave', e => {
+    if (!zone.contains(e.relatedTarget)) zone.classList.remove('drag-over');
+  });
   zone.addEventListener('drop', e => {
     e.preventDefault();
     zone.classList.remove('drag-over');
     const file = e.dataTransfer.files[0];
     if (file) setFile(file);
   });
+
+  // 파일이 없을 때만 드롭존 클릭 → 파일 선택창
   zone.addEventListener('click', e => {
-    if (e.target.closest('#filePreview') || e.target.id === 'removeFile') return;
-    if (!e.target.classList.contains('link-btn')) {
-      document.getElementById('fileInput').click();
-    }
+    if (selectedFile) return;                           // 파일 이미 선택됨 → 무시
+    if (e.target.id === 'selectFileBtn') return;        // 버튼 자체 클릭은 버튼 핸들러가 처리
+    if (e.target.closest('#filePreview')) return;       // 미리보기 영역 클릭 → 무시
+    document.getElementById('fileInput').click();
   });
 }
 
 function onFileSelect(e) {
   const file = e.target.files[0];
   if (file) setFile(file);
+  // value 초기화 → 같은 파일 재선택 가능하게
+  e.target.value = '';
 }
 
 function setFile(file) {
   selectedFile = file;
   document.getElementById('fileName').textContent = file.name;
   document.getElementById('filePreview').hidden = false;
+  document.getElementById('dropContent').hidden = true;
+  document.getElementById('dropZone').classList.add('has-file');
   document.getElementById('analyzeBtn').disabled = false;
+  hideError();
 }
 
-function clearFile(e) {
+function onRemoveFile(e) {
   e.stopPropagation();
   selectedFile = null;
   document.getElementById('fileInput').value = '';
   document.getElementById('filePreview').hidden = true;
+  document.getElementById('dropContent').hidden = false;
+  document.getElementById('dropZone').classList.remove('has-file');
   document.getElementById('analyzeBtn').disabled = true;
 }
 
@@ -63,8 +83,10 @@ function setupTabs() {
 
 /* ===== ANALYZE ===== */
 async function onAnalyze() {
-  if (!selectedFile) return;
+  if (!selectedFile || isAnalyzing) return;
 
+  isAnalyzing = true;
+  hideError();
   showLoading();
 
   const formData = new FormData();
@@ -76,56 +98,65 @@ async function onAnalyze() {
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      hideLoading();
-      showError(err.error || '서버 오류가 발생했습니다.');
-      return;
+      throw new Error(err.error || `서버 오류 (${res.status})`);
     }
 
     // SSE 스트림 읽기
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    let gotResult = false;
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
 
-      const events = buffer.split('\n\n');
-      buffer = events.pop(); // 마지막 미완성 이벤트 보존
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop();
 
-      for (const raw of events) {
-        if (!raw.trim()) continue;
-        const eventLine = raw.split('\n').find(l => l.startsWith('event:'));
-        const dataLine = raw.split('\n').find(l => l.startsWith('data:'));
-        if (!eventLine || !dataLine) continue;
+      for (const chunk of parts) {
+        if (!chunk.trim()) continue;
+        const lines = chunk.split('\n');
+        const evtLine = lines.find(l => l.startsWith('event:'));
+        const dataLine = lines.find(l => l.startsWith('data:'));
+        if (!evtLine || !dataLine) continue;
 
-        const eventType = eventLine.replace('event:', '').trim();
-        const data = JSON.parse(dataLine.replace('data:', '').trim());
+        const eventType = evtLine.slice(6).trim();
+        let data;
+        try {
+          data = JSON.parse(dataLine.slice(5).trim());
+        } catch {
+          continue;
+        }
 
         if (eventType === 'progress') {
           updateLoadingStep(data.step);
         } else if (eventType === 'done') {
+          gotResult = true;
           hideLoading();
           renderResults(data.result);
           return;
         } else if (eventType === 'error') {
-          hideLoading();
-          showError(data.message);
-          return;
+          throw new Error(data.message);
         }
       }
     }
-    hideLoading();
+
+    if (!gotResult) {
+      throw new Error('분석 결과를 받지 못했습니다. 파일을 확인 후 다시 시도해주세요.');
+    }
+
   } catch (err) {
     hideLoading();
-    showError('연결 오류: ' + err.message);
+    showError(err.message);
+  } finally {
+    isAnalyzing = false;
   }
 }
 
 function updateLoadingStep(step) {
-  const steps = ['step1', 'step2', 'step3', 'step4'];
-  steps.forEach((id, i) => {
+  ['step1', 'step2', 'step3', 'step4'].forEach((id, i) => {
     const el = document.getElementById(id);
     el.classList.remove('active', 'done');
     if (i < step - 1) el.classList.add('done');
@@ -137,65 +168,63 @@ function updateLoadingStep(step) {
 function showLoading() {
   document.getElementById('loadingOverlay').hidden = false;
   document.getElementById('resultsSection').hidden = true;
+  document.getElementById('analyzeBtn').disabled = true;
   document.getElementById('step1').classList.add('active');
 }
 
 function hideLoading() {
   document.getElementById('loadingOverlay').hidden = true;
-  ['step1','step2','step3','step4'].forEach(id => {
-    const el = document.getElementById(id);
-    el.classList.remove('active', 'done');
+  ['step1', 'step2', 'step3', 'step4'].forEach(id => {
+    document.getElementById(id).classList.remove('active', 'done');
   });
+  document.getElementById('analyzeBtn').disabled = !selectedFile;
 }
 
-/* ===== ERROR ===== */
+/* ===== ERROR BANNER ===== */
 function showError(msg) {
-  alert('오류: ' + msg);
+  const banner = document.getElementById('errorBanner');
+  document.getElementById('errorBannerMsg').textContent = msg;
+  banner.hidden = false;
+  banner.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function hideError() {
+  document.getElementById('errorBanner').hidden = true;
 }
 
 /* ===== RENDER RESULTS ===== */
 function renderResults(r) {
   const s = r.summary || {};
 
-  // 요약
-  const riskEl = document.getElementById('summaryRisk');
   const riskMap = { '낮음': 'risk-low', '보통': 'risk-medium', '높음': 'risk-high', '매우높음': 'risk-very-high' };
+  const riskEl = document.getElementById('summaryRisk');
   riskEl.className = 'summary-card ' + (riskMap[s.risk_level] || '');
   document.getElementById('riskLevel').textContent = s.risk_level || '-';
 
   document.getElementById('totalQuoted').textContent = s.total_quoted ? formatWon(s.total_quoted) : '불명확';
   document.getElementById('totalFair').textContent = s.total_fair ? formatWon(s.total_fair) : '-';
 
-  const opEl = document.getElementById('summaryOverprice');
   const rate = s.overprice_rate;
+  const opEl = document.getElementById('summaryOverprice');
   if (rate != null) {
     document.getElementById('overpriceRate').textContent = (rate > 0 ? '+' : '') + rate + '%';
     opEl.className = 'summary-card ' + (rate <= 5 ? 'overprice-ok' : rate <= 20 ? 'overprice-warn' : 'overprice-danger');
   } else {
     document.getElementById('overpriceRate').textContent = '-';
+    opEl.className = 'summary-card';
   }
 
   document.getElementById('oneLine').textContent = s.one_line || '';
 
-  // 항목
   renderItems(r.items || [], r.missing_items || []);
-
-  // 레드플래그
   renderRedFlags(r.red_flags || []);
-
-  // 협상
   renderNegotiation(r.negotiation || {});
-
-  // 체크리스트
   renderChecklist(r.contract_checklist || []);
-
-  // 종합 조언
   document.getElementById('overallAdvice').textContent = r.overall_advice || '';
 
   document.getElementById('resultsSection').hidden = false;
   document.getElementById('resultsSection').scrollIntoView({ behavior: 'smooth', block: 'start' });
 
-  // 탭 첫번째 활성화
   document.querySelectorAll('.tab-btn').forEach((b, i) => b.classList.toggle('active', i === 0));
   document.querySelectorAll('.tab-content').forEach((c, i) => c.classList.toggle('active', i === 0));
 }
@@ -226,8 +255,7 @@ function renderItems(items, missing) {
 
   const missingEl = document.getElementById('missingItems');
   if (missing.length) {
-    const ul = document.getElementById('missingList');
-    ul.innerHTML = missing.map(m => `<li>${esc(m)}</li>`).join('');
+    document.getElementById('missingList').innerHTML = missing.map(m => `<li>${esc(m)}</li>`).join('');
     missingEl.hidden = false;
   } else {
     missingEl.hidden = true;
@@ -279,7 +307,9 @@ function copyScript(btn, idx) {
   const text = window._scripts[idx]?.script || '';
   navigator.clipboard.writeText(text).then(() => {
     btn.textContent = '✅ 복사됨';
-    setTimeout(() => btn.textContent = '📋 복사', 2000);
+    setTimeout(() => { btn.textContent = '📋 복사'; }, 2000);
+  }).catch(() => {
+    btn.textContent = '복사 실패';
   });
 }
 
@@ -328,8 +358,9 @@ function esc(str) {
 }
 
 function resetForm() {
-  clearFile({ stopPropagation: () => {} });
+  onRemoveFile({ stopPropagation: () => {} });
   document.getElementById('contextInput').value = '';
   document.getElementById('resultsSection').hidden = true;
-  document.getElementById('uploadSection').scrollIntoView({ behavior: 'smooth' });
+  hideError();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
 }

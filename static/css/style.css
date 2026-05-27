@@ -82,6 +82,23 @@ body {
 .card h4 { font-size: 1rem; font-weight: 700; margin-bottom: 16px; }
 .card h5 { font-size: .9rem; font-weight: 600; margin-bottom: 10px; }
 
+/* ===== ERROR BANNER ===== */
+.error-banner {
+  display: flex; align-items: center; gap: 12px;
+  background: var(--danger-light); border: 1px solid #fca5a5;
+  border-radius: var(--radius); padding: 14px 18px;
+  margin-bottom: 16px; animation: slideDown .25s ease;
+}
+@keyframes slideDown { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
+.error-banner-icon { font-size: 1.2rem; flex-shrink: 0; }
+.error-banner-msg { flex: 1; font-size: .9rem; color: #991b1b; line-height: 1.5; }
+.error-banner-close {
+  background: none; border: none; color: #9ca3af; cursor: pointer;
+  font-size: 1rem; padding: 2px 6px; flex-shrink: 0;
+  transition: color .2s; border-radius: 4px;
+}
+.error-banner-close:hover { color: var(--danger); background: rgba(220,38,38,.08); }
+
 /* ===== UPLOAD ===== */
 .upload-card h3 { font-size: 1.15rem; }
 .drop-zone {
@@ -89,12 +106,15 @@ body {
   border-radius: 10px;
   padding: 40px 20px;
   text-align: center;
-  cursor: pointer;
   transition: all .2s;
   background: var(--neutral-light);
   margin-bottom: 18px;
+  position: relative;
 }
-.drop-zone:hover, .drop-zone.drag-over {
+/* 파일 없을 때만 pointer 커서 */
+.drop-zone:not(.has-file) { cursor: pointer; }
+.drop-zone:not(.has-file):hover,
+.drop-zone.drag-over {
   border-color: var(--primary);
   background: var(--primary-light);
 }
@@ -107,7 +127,7 @@ body {
 }
 .file-preview {
   display: flex; align-items: center; justify-content: center; gap: 8px;
-  margin-top: 12px; padding: 10px 16px;
+  padding: 10px 16px;
   background: #fff; border: 1px solid var(--border); border-radius: 8px;
   font-size: .9rem;
 }
