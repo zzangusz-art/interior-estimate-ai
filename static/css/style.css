@@ -192,6 +192,11 @@ body {
 }
 @keyframes pulse { 0% { transform: translate(-50%,-50%) scale(.8); opacity: .7; } 100% { transform: translate(-50%,-50%) scale(1.6); opacity: 0; } }
 .loading-card h4 { font-size: 1rem; margin-bottom: 20px; color: var(--text); }
+.loading-live-msg {
+  font-size: .88rem; color: var(--text-muted);
+  min-height: 1.4em; margin: 8px 0 4px;
+  transition: opacity .3s;
+}
 .loading-steps { text-align: left; }
 .step {
   padding: 7px 12px; border-radius: 6px; font-size: .85rem;

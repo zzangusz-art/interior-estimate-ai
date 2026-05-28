@@ -131,7 +131,9 @@ async function onAnalyze() {
         }
 
         if (eventType === 'progress') {
+          window._currentMsg = data.message;
           updateLoadingStep(data.step);
+          updateLoadingMessage(data.message);
         } else if (eventType === 'done') {
           gotResult = true;
           hideLoading();
@@ -156,12 +158,18 @@ async function onAnalyze() {
 }
 
 function updateLoadingStep(step) {
+  // step은 1~4, 현재 step만 active, 이전 step은 done
   ['step1', 'step2', 'step3', 'step4'].forEach((id, i) => {
     const el = document.getElementById(id);
     el.classList.remove('active', 'done');
-    if (i < step - 1) el.classList.add('done');
+    if (i < step - 1)      el.classList.add('done');
     else if (i === step - 1) el.classList.add('active');
   });
+  // 메시지도 업데이트
+  const stepEl = document.getElementById('step' + step);
+  if (stepEl && window._currentMsg) {
+    stepEl.dataset.msg = window._currentMsg;
+  }
 }
 
 /* ===== LOADING ===== */
@@ -170,6 +178,12 @@ function showLoading() {
   document.getElementById('resultsSection').hidden = true;
   document.getElementById('analyzeBtn').disabled = true;
   document.getElementById('step1').classList.add('active');
+  document.getElementById('loadingMsg').textContent = '파일 읽는 중...';
+}
+
+function updateLoadingMessage(msg) {
+  const el = document.getElementById('loadingMsg');
+  if (el) el.textContent = msg;
 }
 
 function hideLoading() {
