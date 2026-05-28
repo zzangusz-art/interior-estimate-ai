@@ -74,47 +74,51 @@ def _is_garbled(text: str) -> bool:
 def _pdf_to_image(file_path: str) -> dict:
     """PDF를 이미지로 변환하여 Vision API용 데이터 반환 (첫 3페이지)"""
     import pypdfium2 as pdfium
+    from PIL import Image as PILImage
 
     pdf = pdfium.PdfDocument(file_path)
-    page_images = []
+    page_pils = []
 
     max_pages = min(len(pdf), 3)
     for i in range(max_pages):
         page = pdf[i]
         bitmap = page.render(scale=2.0)  # 144dpi
-        pil_image = bitmap.to_pil()
+        pil_image = bitmap.to_pil().convert("RGB")
+        page_pils.append(pil_image)
 
-        buf = io.BytesIO()
-        pil_image.save(buf, format="PNG")
-        page_images.append(buf.getvalue())
-
-    if not page_images:
+    if not page_pils:
         return {"type": "pdf", "text": "", "tables": [], "image_base64": None}
 
     # 페이지가 여러 장이면 세로로 합치기
-    if len(page_images) == 1:
-        final_bytes = page_images[0]
+    if len(page_pils) == 1:
+        final_img = page_pils[0]
     else:
-        from PIL import Image as PILImage
-        imgs = [PILImage.open(io.BytesIO(b)) for b in page_images]
-        total_height = sum(img.height for img in imgs)
-        max_width = max(img.width for img in imgs)
-        combined = PILImage.new("RGB", (max_width, total_height), (255, 255, 255))
+        total_height = sum(img.height for img in page_pils)
+        max_width = max(img.width for img in page_pils)
+        final_img = PILImage.new("RGB", (max_width, total_height), (255, 255, 255))
         y_offset = 0
-        for img in imgs:
-            combined.paste(img, (0, y_offset))
+        for img in page_pils:
+            final_img.paste(img, (0, y_offset))
             y_offset += img.height
-        buf = io.BytesIO()
-        combined.save(buf, format="PNG")
-        final_bytes = buf.getvalue()
 
-    b64 = base64.standard_b64encode(final_bytes).decode("utf-8")
+    # 최장 변 2048px 이하로 리사이즈 (큰 PDF 페이지 → API 한계 이내 보장)
+    MAX_DIM = 2048
+    w, h = final_img.size
+    if max(w, h) > MAX_DIM:
+        ratio = MAX_DIM / max(w, h)
+        final_img = final_img.resize(
+            (int(w * ratio), int(h * ratio)), PILImage.LANCZOS
+        )
+
+    # JPEG 압축으로 4MB 이내 보장 (PNG는 크기 예측 불가)
+    img_bytes = _encode_jpeg(final_img, target_max_bytes=4 * 1024 * 1024)
+    b64 = base64.standard_b64encode(img_bytes).decode("utf-8")
     return {
         "type": "pdf_image",
         "text": "",
         "tables": [],
         "image_base64": b64,
-        "media_type": "image/png",
+        "media_type": "image/jpeg",
     }
 
 
@@ -219,15 +223,16 @@ def _parse_image(file_path: str) -> dict:
 
 def _encode_jpeg(img, target_max_bytes: int = 4 * 1024 * 1024) -> bytes:
     """목표 크기 이내로 JPEG 인코딩 (quality 단계적 감소)"""
+    from PIL import Image as _PIL  # 독립 함수이므로 직접 임포트
     for quality in (92, 80, 65, 50):
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=quality, optimize=True)
         data = buf.getvalue()
         if len(data) <= target_max_bytes:
             return data
-    # 최후 수단: 절반 크기로 재시도
+    # 최후 수단: 절반 크기로 재시도 (이전에는 PILImage 미정의 NameError 발생)
     w, h = img.size
-    small = img.resize((w // 2, h // 2), PILImage.LANCZOS)
+    small = img.resize((w // 2, h // 2), _PIL.LANCZOS)
     buf = io.BytesIO()
     small.save(buf, format="JPEG", quality=75, optimize=True)
     return buf.getvalue()

@@ -93,68 +93,132 @@ async function onAnalyze() {
   formData.append('file', selectedFile);
   formData.append('context', document.getElementById('contextInput').value);
 
+  // 150초 타임아웃 (AbortController)
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 150000);
+
   try {
-    const res = await fetch('/analyze', { method: 'POST', body: formData });
+    const res = await fetch('/analyze', {
+      method: 'POST',
+      body: formData,
+      signal: controller.signal,
+    });
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || `서버 오류 (${res.status})`);
     }
 
-    // SSE 스트림 읽기
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let gotResult = false;
+    // ── SSE 스트림 읽기 ──────────────────────────────────────────
+    // res.body.getReader()가 지원되는 브라우저: 스트리밍 실시간 파싱
+    // 미지원 브라우저 (구형 iOS Safari 등): res.text() 전체 수신 후 파싱
+    const supportsStreaming = res.body && typeof res.body.getReader === 'function';
+    let rawSSE = '';
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+    if (supportsStreaming) {
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let gotResult = false;
 
-      const parts = buffer.split('\n\n');
-      buffer = parts.pop();
-
-      for (const chunk of parts) {
-        if (!chunk.trim()) continue;
-        const lines = chunk.split('\n');
-        const evtLine = lines.find(l => l.startsWith('event:'));
-        const dataLine = lines.find(l => l.startsWith('data:'));
-        if (!evtLine || !dataLine) continue;
-
-        const eventType = evtLine.slice(6).trim();
-        let data;
-        try {
-          data = JSON.parse(dataLine.slice(5).trim());
-        } catch {
-          continue;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          // 스트림 종료 후 buffer에 남은 데이터 처리
+          if (buffer.trim()) {
+            rawSSE += buffer;
+          }
+          break;
         }
+        const chunk = decoder.decode(value, { stream: true });
+        buffer += chunk;
+        rawSSE  += chunk;
 
-        if (eventType === 'progress') {
-          window._currentMsg = data.message;
-          updateLoadingStep(data.step);
-          updateLoadingMessage(data.message);
-        } else if (eventType === 'done') {
-          gotResult = true;
-          hideLoading();
-          renderResults(data.result);
-          return;
-        } else if (eventType === 'error') {
-          throw new Error(data.message);
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop();
+
+        for (const part of parts) {
+          const result = parseSSEChunk(part);
+          if (!result) continue;
+          if (result.type === 'progress') {
+            window._currentMsg = result.data.message;
+            updateLoadingStep(result.data.step);
+            updateLoadingMessage(result.data.message);
+          } else if (result.type === 'done') {
+            gotResult = true;
+            clearTimeout(timeoutId);
+            hideLoading();
+            renderResults(result.data.result);
+            return;
+          } else if (result.type === 'error') {
+            throw new Error(result.data.message);
+          }
         }
       }
-    }
 
-    if (!gotResult) {
-      throw new Error('분석 결과를 받지 못했습니다. 파일을 확인 후 다시 시도해주세요.');
+      // 스트림이 끝났는데 done을 못 받은 경우 — rawSSE 전체를 재파싱
+      if (!gotResult) {
+        const fallbackResult = parseSSEFull(rawSSE);
+        if (fallbackResult) {
+          clearTimeout(timeoutId);
+          hideLoading();
+          renderResults(fallbackResult);
+          return;
+        }
+        throw new Error('분석 결과를 받지 못했습니다. 잠시 후 다시 시도해주세요.');
+      }
+
+    } else {
+      // 스트리밍 미지원 브라우저: 전체 응답 수신 후 파싱
+      updateLoadingMessage('분석 중입니다 (최대 2분 소요)...');
+      const text = await res.text();
+      const result = parseSSEFull(text);
+      if (result) {
+        clearTimeout(timeoutId);
+        hideLoading();
+        renderResults(result);
+        return;
+      }
+      throw new Error('분석 결과를 받지 못했습니다. 잠시 후 다시 시도해주세요.');
     }
 
   } catch (err) {
+    clearTimeout(timeoutId);
     hideLoading();
-    showError(err.message);
+    if (err.name === 'AbortError') {
+      showError('분석 시간이 너무 오래 걸립니다 (2분 초과). 파일을 확인 후 다시 시도해주세요.');
+    } else {
+      showError(err.message);
+    }
   } finally {
     isAnalyzing = false;
   }
+}
+
+/** SSE 청크 1개 파싱: {type, data} 또는 null */
+function parseSSEChunk(chunk) {
+  if (!chunk.trim()) return null;
+  const lines = chunk.split('\n');
+  const evtLine  = lines.find(l => l.startsWith('event:'));
+  const dataLine = lines.find(l => l.startsWith('data:'));
+  if (!evtLine || !dataLine) return null;
+  try {
+    return { type: evtLine.slice(6).trim(), data: JSON.parse(dataLine.slice(5).trim()) };
+  } catch {
+    return null;
+  }
+}
+
+/** SSE 전체 텍스트에서 done 이벤트의 result 를 추출 */
+function parseSSEFull(text) {
+  const chunks = text.split('\n\n');
+  for (const chunk of chunks) {
+    const parsed = parseSSEChunk(chunk);
+    if (parsed && parsed.type === 'done' && parsed.data.result) {
+      return parsed.data.result;
+    }
+  }
+  return null;
 }
 
 function updateLoadingStep(step) {
